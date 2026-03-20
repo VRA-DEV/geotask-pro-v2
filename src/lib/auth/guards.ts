@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyAccessToken, type TokenPayload } from "./jwt";
 import { prisma } from "@/lib/prisma";
+import { getPermissions, type AppPermissions } from "@/lib/permissions";
 
 export interface AuthenticatedRequest extends NextRequest {
-  user: TokenPayload;
+  user: TokenPayload & { permissions?: AppPermissions };
 }
 
 export type ApiHandler = (
@@ -111,6 +112,46 @@ export function withInternalOnly(handler: AuthenticatedHandler): ApiHandler {
 
     return handler(req, context);
   });
+}
+
+/**
+ * Guard: requires authentication + specific permission.
+ * Loads permissions from the user's role (JSON or fallback).
+ *
+ * Usage: withPermission("tasks", "create")(handler)
+ *        withPermission("financial", "generate_bm")(handler)
+ */
+export function withPermission<
+  C extends keyof AppPermissions,
+  P extends keyof AppPermissions[C],
+>(category: C, permission: P) {
+  return (handler: AuthenticatedHandler): ApiHandler => {
+    return withAuth(async (req: AuthenticatedRequest, context) => {
+      // Load role with permissions from DB
+      const role = await prisma.role.findUnique({
+        where: { id: req.user.roleId },
+        select: { name: true, permissions: true },
+      });
+
+      if (!role) {
+        return NextResponse.json({ error: "Cargo nao encontrado" }, { status: 403 });
+      }
+
+      const permissions = getPermissions(role);
+      const allowed = permissions[category]?.[permission];
+
+      if (!allowed) {
+        return NextResponse.json(
+          { error: `Permissao insuficiente: ${String(category)}.${String(permission)}` },
+          { status: 403 },
+        );
+      }
+
+      // Attach permissions to request for downstream use
+      (req as AuthenticatedRequest).user.permissions = permissions;
+      return handler(req, context);
+    });
+  };
 }
 
 /**

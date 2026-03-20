@@ -100,7 +100,14 @@ async function main() {
   console.log(`Task Types: ${taskTypes.length} upserted`);
 
   // ============================================================
-  // 5. ADMIN USER
+  // 5. RENAME LEGACY ROLES/SECTORS (safe UPDATE if exists)
+  // ============================================================
+  await prisma.role.updateMany({ where: { name: "Coordenador" }, data: { name: "Coordenador de Setores" } });
+  await prisma.sector.updateMany({ where: { name: "Atendimento Social" }, data: { name: "Assistencia Social" } });
+  console.log("Legacy renames applied (if applicable)");
+
+  // ============================================================
+  // 6. ADMIN USER
   // ============================================================
   const adminRole = await prisma.role.findUnique({ where: { name: "Admin" } });
   const tiSector = await prisma.sector.findUnique({ where: { name: "TI" } });

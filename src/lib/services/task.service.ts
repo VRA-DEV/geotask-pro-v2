@@ -3,6 +3,7 @@ import { NotFoundError, AppError, ForbiddenError } from "@/lib/errors";
 import type { CreateTaskInput, TaskQueryInput } from "@/lib/dto/task.dto";
 import type { TokenPayload } from "@/lib/auth/jwt";
 import { getTaskVisibilityMode } from "@/lib/permissions";
+import { VisibilityService } from "@/lib/services/visibility.service";
 
 // ============================================================
 // INCLUDES & SELECTS
@@ -140,8 +141,8 @@ export class TaskService {
     const skip = (page - 1) * limit;
     const isSummary = summary === "true";
 
-    // Build WHERE clause with role-based visibility
-    const where = this.buildWhereClause(query, user);
+    // Build WHERE clause with role-based visibility (async — resolves team/sectors)
+    const where = await this.buildWhereClauseAsync(query, user);
 
     const findOptions = { where, orderBy: [{ created_at: "desc" as const }], skip, take: limit };
 
@@ -599,52 +600,17 @@ export class TaskService {
   // PRIVATE: Build WHERE with role-based visibility
   // ============================================================
 
-  private static buildWhereClause(query: TaskQueryInput, user: TokenPayload) {
+  /**
+   * Build WHERE clause with role-based visibility + filters.
+   * Now uses VisibilityService for server-side resolved team/sector IDs.
+   */
+  private static async buildWhereClauseAsync(query: TaskQueryInput, user: TokenPayload) {
     const where: Record<string, unknown> = { deleted_at: null };
-    const visibility = getTaskVisibilityMode(user.roleName);
 
-    // Role-based visibility
-    switch (visibility) {
-      case "all":
-        // Admin/Socio/Diretor see everything
-        break;
-
-      case "team":
-        // Gerente/Coord Polo see team tasks + own created/responsible
-        where.OR = [
-          { team_id: { not: null } }, // Will be refined with user's team_id
-          { responsible_id: user.userId },
-          { created_by_id: user.userId },
-          { coworkers: { some: { user_id: user.userId } } },
-        ];
-        break;
-
-      case "sectors":
-        // Coord Setores see multi-sector tasks + own
-        where.OR = [
-          { responsible_id: user.userId },
-          { created_by_id: user.userId },
-          { coworkers: { some: { user_id: user.userId } } },
-          { sector_id: { not: null } }, // Will be refined with user's sectors
-        ];
-        break;
-
-      case "sector":
-        // Gestor sees own sector + own tasks
-        where.OR = [
-          { responsible_id: user.userId },
-          { created_by_id: user.userId },
-          { coworkers: { some: { user_id: user.userId } } },
-        ];
-        break;
-
-      case "assigned":
-        // Liderado sees only assigned + coworker tasks
-        where.OR = [
-          { responsible_id: user.userId },
-          { coworkers: { some: { user_id: user.userId } } },
-        ];
-        break;
+    // Get visibility filter resolved with actual user data
+    const visibilityFilter = await VisibilityService.getTaskFilter(user);
+    if (visibilityFilter.OR) {
+      where.OR = visibilityFilter.OR;
     }
 
     // Apply filters
@@ -652,10 +618,16 @@ export class TaskService {
     if (query.sector_id) where.sector_id = query.sector_id;
     if (query.responsible_id) where.responsible_id = query.responsible_id;
     if (query.team_id) {
-      where.OR = [
+      const teamFilter = [
         { team_id: query.team_id },
         { responsible: { team_id: query.team_id } },
       ];
+      if (where.OR) {
+        where.AND = [{ OR: where.OR }, { OR: teamFilter }];
+        delete where.OR;
+      } else {
+        where.OR = teamFilter;
+      }
     }
     if (query.created_by_me === "true" && query.created_by_id) {
       where.created_by_id = query.created_by_id;
@@ -680,7 +652,9 @@ export class TaskService {
         ],
       };
       if (where.OR) {
-        where.AND = [{ OR: where.OR }, searchFilter];
+        if (!where.AND) where.AND = [];
+        (where.AND as unknown[]).push({ OR: where.OR });
+        (where.AND as unknown[]).push(searchFilter);
         delete where.OR;
       } else {
         Object.assign(where, searchFilter);
